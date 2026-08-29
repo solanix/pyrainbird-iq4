@@ -1,0 +1,2 @@
+[console_scripts]
+rainbird-iq4-diagnostic = pyrainbird_iq4.diagnostic:main

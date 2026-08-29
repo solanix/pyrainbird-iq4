@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: pyrainbird-iq4
+Version: 0.1.0
+Summary: Python library for communicating with Rain Bird IQ4 irrigation controllers
+License: MIT
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: aiohttp>=3.10
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.24; extra == "dev"
+Requires-Dist: pytest-cov>=5.0; extra == "dev"
+Requires-Dist: ruff>=0.8; extra == "dev"
+Requires-Dist: mypy>=1.13; extra == "dev"
+
+# pyrainbird-iq4
+
+Python library for communicating directly with Rain Bird IQ4 irrigation controllers.
+
+## Goals
+
+- Discover IQ4 controller capabilities
+- Provide asynchronous Python access
+- Support controllers, stations, programs, schedules, and runtime state
+- Maintain a clean API suitable for a Home Assistant integration
+- Provide comprehensive unit tests
