@@ -58,12 +58,23 @@ def test_controller_from_dict() -> None:
 def test_scheduled_time_parses_dummy_date_as_time_of_day() -> None:
     """The API's dummy date is excluded from the public time value."""
     scheduled_time = ScheduledTime.from_dict(
-        {"startTime": "1999-09-09T19:40:00", "startTimeIndex": 1}
+        {"startTime": "1999-09-09T05:00:00", "startTimeIndex": 0}
     )
 
-    assert scheduled_time.time_of_day == time(19, 40)
+    assert scheduled_time.time_of_day == time(5)
+    assert scheduled_time.time_of_day.strftime("%H:%M") == "05:00"
+    assert scheduled_time.raw_start_time == "1999-09-09T05:00:00"
+
+
+def test_scheduled_time_preserves_seconds() -> None:
+    """Seconds remain available in the typed time value when the API sends them."""
+    scheduled_time = ScheduledTime.from_dict(
+        {"startTime": "1999-09-09T19:40:12", "startTimeIndex": 1}
+    )
+
+    assert scheduled_time.time_of_day == time(19, 40, 12)
     assert scheduled_time.time_of_day.strftime("%H:%M") == "19:40"
-    assert scheduled_time.raw_start_time == "1999-09-09T19:40:00"
+    assert scheduled_time.raw_start_time == "1999-09-09T19:40:12"
 
 
 def test_scheduled_time_defaults_missing_or_malformed_value() -> None:
