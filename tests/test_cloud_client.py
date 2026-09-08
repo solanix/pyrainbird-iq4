@@ -59,7 +59,9 @@ async def test_read_only_cloud_methods_parse_iq4_data() -> None:
     """Read-only methods pass IQ4 parameters and parse sample responses."""
     client = _FakeCloudClient(
         {
-            "/Station/GetStationListForSatellite": [{"id": 1, "name": "Front lawn", "terminal": 2}],
+            "/Station/GetStationListForSatellite": [
+                {"id": 1, "name": "Front lawn", "terminal": 2, "isLocked": True}
+            ],
             "/Program/GetProgramList": [
                 {
                     "id": 10,
@@ -109,6 +111,8 @@ async def test_read_only_cloud_methods_parse_iq4_data() -> None:
 
     assert stations[0].controller_id == 7
     assert stations[0].name == "Front lawn"
+    assert stations[0].is_locked is True
+    assert stations[0].is_enabled is True
     assert programs[0].short_name == "A"
     assert start_times[0].time_of_day == "06:30"
     assert len(start_times) == 1

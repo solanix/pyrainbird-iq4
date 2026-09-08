@@ -2,7 +2,15 @@
 
 from datetime import time
 
-from pyrainbird_iq4.cloud.models import Controller, ScheduledTime, Site, Station
+from pyrainbird_iq4.cloud.models import (
+    Controller,
+    ScheduledTime,
+    Site,
+    Station,
+    disabled_stations,
+    enabled_stations,
+    unknown_state_stations,
+)
 
 
 def test_site_from_dict() -> None:
@@ -68,6 +76,34 @@ def test_station_blank_name_uses_padded_terminal_fallback() -> None:
     for name in (None, "", "   "):
         station = Station.from_dict({"id": 108, "name": name, "terminal": 8}, 200001)
         assert station.name == "Station 008"
+
+
+def test_station_enabled_state_uses_verified_is_locked_semantics() -> None:
+    """The raw lock field maps true/false/missing without collapsing unknown."""
+    stations = [
+        Station.from_dict(
+            {
+                "id": terminal,
+                "name": f"Cloud Station {terminal}",
+                "terminal": terminal,
+                "isLocked": terminal <= 7,
+            },
+            200001,
+        )
+        for terminal in range(1, 11)
+    ]
+
+    assert [station.terminal for station in enabled_stations(stations)] == list(range(1, 8))
+    assert [station.terminal for station in disabled_stations(stations)] == [8, 9, 10]
+    assert unknown_state_stations(stations) == []
+    assert stations[0].is_locked is True
+    assert stations[7].is_locked is False
+    assert stations[9].is_locked is False
+    unknown = Station.from_dict({"id": 11, "name": "Spare", "terminal": 11}, 200001)
+    assert unknown.is_locked is None
+    assert unknown.is_enabled is None
+    assert unknown_state_stations([unknown]) == [unknown]
+    assert stations[7].name == "Cloud Station 8"
 
 
 def test_scheduled_time_parses_dummy_date_as_time_of_day() -> None:

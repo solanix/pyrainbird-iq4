@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -86,6 +87,7 @@ class Station:
     controller_id: int
     name: str
     terminal: int
+    is_locked: bool | None = None
 
     def __post_init__(self) -> None:
         """Normalize the API name while preserving immutable station identity."""
@@ -93,6 +95,11 @@ class Station:
         if not name:
             name = f"Station {self.terminal:03d}"
         object.__setattr__(self, "name", name)
+
+    @property
+    def is_enabled(self) -> bool | None:
+        """Return normalized enabled state from the verified IQ4 lock flag."""
+        return self.is_locked
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], controller_id: int) -> Station:
@@ -103,7 +110,23 @@ class Station:
             controller_id=controller_id,
             name=name if isinstance(name, str) else "",
             terminal=data.get("terminal", 0),
+            is_locked=data.get("isLocked") if isinstance(data.get("isLocked"), bool) else None,
         )
+
+
+def enabled_stations(stations: Iterable[Station]) -> list[Station]:
+    """Return stations verified enabled by the supported station-list endpoint."""
+    return [station for station in stations if station.is_enabled is True]
+
+
+def disabled_stations(stations: Iterable[Station]) -> list[Station]:
+    """Return stations verified disabled by the supported station-list endpoint."""
+    return [station for station in stations if station.is_enabled is False]
+
+
+def unknown_state_stations(stations: Iterable[Station]) -> list[Station]:
+    """Return stations whose enabled state is absent or unknown."""
+    return [station for station in stations if station.is_enabled is None]
 
 
 @dataclass(slots=True, frozen=True)
