@@ -7,7 +7,13 @@ import pytest
 
 from pyrainbird_iq4.cloud.client import RainBirdIQ4CloudClient
 from pyrainbird_iq4.cloud.models import ScheduledProgram, ScheduledTime
-from pyrainbird_iq4.exceptions import RainBirdIQ4Error
+from pyrainbird_iq4.exceptions import (
+    RainBirdIQ4APIError,
+    RainBirdIQ4AuthenticationError,
+    RainBirdIQ4Error,
+    RainBirdIQ4ForbiddenError,
+    RainBirdIQ4UnsupportedEndpointError,
+)
 
 
 class _HttpResponseContext:
@@ -22,8 +28,8 @@ class _HttpResponseContext:
 
 
 class _HttpResponse:
-    def __init__(self, body: str, content_type: str | None) -> None:
-        self.status = 200
+    def __init__(self, body: str, content_type: str | None, status: int = 200) -> None:
+        self.status = status
         self.headers = {"Content-Type": content_type} if content_type else {}
         self.body = body
 
@@ -53,9 +59,7 @@ async def test_read_only_cloud_methods_parse_iq4_data() -> None:
     """Read-only methods pass IQ4 parameters and parse sample responses."""
     client = _FakeCloudClient(
         {
-            "/Station/GetStationListForSatellite": [
-                {"id": 1, "name": "Front lawn", "terminal": 2}
-            ],
+            "/Station/GetStationListForSatellite": [{"id": 1, "name": "Front lawn", "terminal": 2}],
             "/Program/GetProgramList": [
                 {
                     "id": 10,
@@ -70,9 +74,7 @@ async def test_read_only_cloud_methods_parse_iq4_data() -> None:
                     {"id": 12, "name": "Legacy", "satelliteId": 8},
                 ]
             },
-            "/Program/GetScheduledStartTimes": {
-                "scheduled": [{"programId": 10, "time": "06:30"}]
-            },
+            "/Program/GetScheduledStartTimes": {"scheduled": [{"programId": 10, "time": "06:30"}]},
             "/StartTime/GetAllStartTimes": [
                 {"id": 20, "programId": 10, "dateTime": "1999-09-09T06:30:00"},
                 {"id": 21, "programId": 99, "dateTime": "1999-09-09T07:00:00"},
@@ -92,9 +94,7 @@ async def test_read_only_cloud_methods_parse_iq4_data() -> None:
                 }
             ],
             "/Satellite/isConnected": {
-                "satellites": [
-                    {"id": 7, "isConnected": True, "timestamp": "now"}
-                ]
+                "satellites": [{"id": 7, "isConnected": True, "timestamp": "now"}]
             },
         }
     )
@@ -216,12 +216,8 @@ async def test_effective_programs_use_direct_programs_first() -> None:
     """Legacy direct programs take precedence over scheduled fallback."""
     client = _FakeCloudClient(
         {
-            "/Program/GetProgramList": [
-                {"id": 1, "name": "Legacy A", "satelliteId": 7}
-            ],
-            "/Program/GetScheduledStartTimes": [
-                {"programId": 2, "programName": "MQTT A"}
-            ],
+            "/Program/GetProgramList": [{"id": 1, "name": "Legacy A", "satelliteId": 7}],
+            "/Program/GetScheduledStartTimes": [{"programId": 2, "programName": "MQTT A"}],
         }
     )
 
@@ -237,9 +233,7 @@ async def test_effective_programs_fall_back_to_scheduled_programs() -> None:
     client = _FakeCloudClient(
         {
             "/Program/GetProgramList": [],
-            "/Program/GetScheduledStartTimes": [
-                {"programId": 2, "programName": "Program A"}
-            ],
+            "/Program/GetScheduledStartTimes": [{"programId": 2, "programName": "Program A"}],
         }
     )
 
@@ -320,7 +314,132 @@ async def test_response_debug_reports_structure_without_values() -> None:
         "content_length": 45,
         "empty": False,
         "json_structure": (
-            "object keys=[programs] children=[programs=list[1] "
-            "item=object keys=[id, name]]"
+            "object keys=[programs] children=[programs=list[1] item=object keys=[id, name]]"
         ),
     }
+
+
+async def test_controller_detail_structure_is_value_free() -> None:
+    """Detailed controller diagnostics expose keys and types, not values."""
+    client = _FakeCloudClient(
+        {
+            "/Satellite/GetSatellite": {
+                "id": 200001,
+                "name": "Backyard",
+                "state": {"activeStationId": None, "remainingRuntime": 0},
+            },
+            "/Station/GetStation": {
+                "id": 101,
+                "name": "Station 001",
+                "enabled": True,
+            },
+        }
+    )
+
+    structure = await client.get_controller_detail_response_structure(200001)
+    station_structure = await client.get_station_detail_response_structure(101)
+
+    assert structure == (
+        "object keys=[id, name, state] children=[state=object "
+        "keys=[activeStationId, remainingRuntime] "
+        "children=[activeStationId=null]]"
+    )
+    assert "Backyard" not in structure
+    assert station_structure == "object keys=[enabled, id, name]"
+    assert "Station 001" not in station_structure
+    assert client.calls == [
+        ("/Satellite/GetSatellite", {"satelliteId": "200001"}),
+        ("/Station/GetStation", {"stationId": "101"}),
+    ]
+
+
+async def test_station_list_debug_allowlists_configuration_values() -> None:
+    """Station-list debug reveals only the requested candidate state fields."""
+    client = _FakeCloudClient(
+        {
+            "/Station/GetStationListForSatellite": [
+                {
+                    "id": 108,
+                    "name": "Secret back garden",
+                    "terminal": 8,
+                    "suspended": True,
+                    "isLocked": False,
+                    "discoveryState": "Discovered",
+                    "status": None,
+                    "notes": "private note",
+                    "coordinates": "1,2",
+                    "address": "private address",
+                    "credential": "do-not-print",
+                },
+                {"id": 101, "terminal": 1, "name": "Secret front garden"},
+            ]
+        }
+    )
+
+    lines = await client.get_station_list_debug(200001)
+
+    assert lines == [
+        "Station list item 1: "
+        "id=108 terminal=8 suspended=True isLocked=False "
+        "discoveryState=\x27Discovered\x27 status=None",
+        "Station list item 2: id=101 terminal=1 suspended=None isLocked=None "
+        "discoveryState=None status=None",
+    ]
+    output = "\n".join(lines)
+    for sensitive_value in (
+        "Secret back garden",
+        "Secret front garden",
+        "private note",
+        "1,2",
+        "private address",
+        "do-not-print",
+    ):
+        assert sensitive_value not in output
+    assert client.calls == [("/Station/GetStationListForSatellite", {"satelliteId": "200001"})]
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        pytest.param(403, RainBirdIQ4ForbiddenError, id="forbidden"),
+        pytest.param(404, RainBirdIQ4UnsupportedEndpointError, id="unsupported"),
+        pytest.param(500, RainBirdIQ4APIError, id="api-error"),
+    ],
+)
+async def test_endpoint_errors_are_classified_without_secrets(
+    status: int,
+    error_type: type[RainBirdIQ4APIError],
+) -> None:
+    """Endpoint errors include only a sanitized path and HTTP status."""
+    secret = "secret-access-token"
+    session = _HttpSession(
+        _HttpResponse(
+            "authorization=Bearer leaked-value cookie=session-secret",
+            "application/json",
+            status,
+        )
+    )
+    client = RainBirdIQ4CloudClient(secret, session=session)
+
+    with pytest.raises(error_type) as raised:
+        await client._get("/Satellite/GetSatellite?access_token=query-secret#fragment-secret")
+
+    assert raised.value.endpoint == "/Satellite/GetSatellite"
+    assert raised.value.status == status
+    assert secret not in str(raised.value)
+    assert "query-secret" not in str(raised.value)
+    assert "fragment-secret" not in str(raised.value)
+    assert "leaked-value" not in str(raised.value)
+    assert "session-secret" not in str(raised.value)
+
+
+async def test_unauthorized_endpoint_is_token_failure() -> None:
+    """HTTP 401 remains an access-token authentication failure."""
+    session = _HttpSession(_HttpResponse("", "application/json", 401))
+    client = RainBirdIQ4CloudClient("secret-access-token", session=session)
+
+    with pytest.raises(
+        RainBirdIQ4AuthenticationError,
+        match="access token was rejected by endpoint /Site/GetSites",
+    ):
+        await client.get_sites()

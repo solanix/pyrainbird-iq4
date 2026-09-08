@@ -12,10 +12,12 @@ license = { text = "MIT" }
 
 dependencies = [
     "aiohttp>=3.10",
+    "pyrainbird>=6.5.0",
 ]
 
 [project.scripts]
 rainbird-iq4-diagnostic = "pyrainbird_iq4.diagnostic:main"
+rainbird-iq4-local-diagnostic = "pyrainbird_iq4.local_diagnostic:main"
 
 [project.optional-dependencies]
 dev = [
@@ -28,6 +30,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+pyrainbird_iq4 = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

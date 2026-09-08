@@ -65,11 +65,14 @@ class RainBirdIQ4Client:
         timeout = aiohttp.ClientTimeout(total=self.timeout)
 
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session, session.get(
-                url,
-                ssl=self._ssl_context(),
-                allow_redirects=False,
-            ) as response:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(
+                    url,
+                    ssl=self._ssl_context(),
+                    allow_redirects=False,
+                ) as response,
+            ):
                 body = await response.text(errors="replace")
 
                 return ProbeResponse(

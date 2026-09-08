@@ -2,7 +2,7 @@
 
 from datetime import time
 
-from pyrainbird_iq4.cloud.models import Controller, ScheduledTime, Site
+from pyrainbird_iq4.cloud.models import Controller, ScheduledTime, Site, Station
 
 
 def test_site_from_dict() -> None:
@@ -55,6 +55,21 @@ def test_controller_from_dict() -> None:
     assert controller.satellite_enabled is True
 
 
+def test_station_preserves_cloud_name_and_immutable_identity() -> None:
+    """Cloud names are presentation data independent of stable station identity."""
+    station = Station.from_dict({"id": 108, "name": "Front Lawn", "terminal": 8}, 200001)
+
+    assert (station.id, station.controller_id, station.terminal) == (108, 200001, 8)
+    assert station.name == "Front Lawn"
+
+
+def test_station_blank_name_uses_padded_terminal_fallback() -> None:
+    """Null, blank, and whitespace-only API names use the deterministic fallback."""
+    for name in (None, "", "   "):
+        station = Station.from_dict({"id": 108, "name": name, "terminal": 8}, 200001)
+        assert station.name == "Station 008"
+
+
 def test_scheduled_time_parses_dummy_date_as_time_of_day() -> None:
     """The API's dummy date is excluded from the public time value."""
     scheduled_time = ScheduledTime.from_dict(
@@ -85,3 +100,16 @@ def test_scheduled_time_defaults_missing_or_malformed_value() -> None:
     assert missing.time_of_day == time.min
     assert malformed.time_of_day == time.min
     assert malformed.raw_start_time == "not-a-time"
+
+
+def test_controller_preserves_missing_rain_delay() -> None:
+    """A missing rain-delay field is not fabricated as zero."""
+    controller = Controller.from_dict(
+        {
+            "id": 100,
+            "name": "Controller",
+            "siteId": 1,
+        }
+    )
+
+    assert controller.rain_delay is None

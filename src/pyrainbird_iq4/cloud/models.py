@@ -50,7 +50,7 @@ class Controller:
     is_mqtt: bool
     latitude: float
     longitude: float
-    rain_delay: int
+    rain_delay: int | None
     simultaneous_stations: int
     is_shutdown: bool
     satellite_enabled: bool
@@ -71,7 +71,7 @@ class Controller:
             is_mqtt=data.get("isMQTT", False),
             latitude=data.get("latitude", 0.0),
             longitude=data.get("longitude", 0.0),
-            rain_delay=data.get("rainDelay", 0),
+            rain_delay=data.get("rainDelay"),
             simultaneous_stations=data.get("simultaneousStations", 0),
             is_shutdown=data.get("isShutdown", False),
             satellite_enabled=data.get("satelliteEnabled", False),
@@ -87,13 +87,21 @@ class Station:
     name: str
     terminal: int
 
+    def __post_init__(self) -> None:
+        """Normalize the API name while preserving immutable station identity."""
+        name = self.name.strip() if isinstance(self.name, str) else ""
+        if not name:
+            name = f"Station {self.terminal:03d}"
+        object.__setattr__(self, "name", name)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any], controller_id: int) -> Station:
         """Create a station from an IQ4 API response."""
+        name = data.get("name")
         return cls(
             id=data["id"],
             controller_id=controller_id,
-            name=data["name"],
+            name=name if isinstance(name, str) else "",
             terminal=data.get("terminal", 0),
         )
 
@@ -173,9 +181,7 @@ class ScheduledProgram:
             program_id=data["programId"],
             program_name=data.get("programName", ""),
             scheduled_times=tuple(
-                ScheduledTime.from_dict(item)
-                for item in scheduled_times
-                if isinstance(item, dict)
+                ScheduledTime.from_dict(item) for item in scheduled_times if isinstance(item, dict)
             ),
         )
 
@@ -246,8 +252,7 @@ class StationRuntime:
     def from_dict(cls, data: dict[str, Any]) -> StationRuntime:
         """Create station runtimes from an IQ4 API response."""
         assignments = tuple(
-            RuntimeAssignment.from_dict(item)
-            for item in data.get("runtimeProgramAssignedList", [])
+            RuntimeAssignment.from_dict(item) for item in data.get("runtimeProgramAssignedList", [])
         )
         return cls(station_id=data["stationId"], assignments=assignments)
 

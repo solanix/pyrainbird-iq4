@@ -1,5 +1,7 @@
 """Tests for the IQ4 development diagnostic command."""
 
+import pytest
+
 from pyrainbird_iq4 import diagnostic
 from pyrainbird_iq4.cloud.models import (
     ConnectionStatus,
@@ -15,6 +17,7 @@ from pyrainbird_iq4.cloud.models import (
 from pyrainbird_iq4.exceptions import (
     RainBirdIQ4AuthenticationError,
     RainBirdIQ4ConnectionError,
+    RainBirdIQ4ForbiddenError,
 )
 
 
@@ -74,8 +77,14 @@ def test_diagnostic_prints_non_secret_cloud_data(monkeypatch, capsys) -> None:  
         ) -> list[ConnectionStatus]:
             return [ConnectionStatus(3, True, "2026-01-01T00:00:00Z")]
 
+        async def get_controller_detail_response_structure(self, _controller_id: int) -> str:
+            raise RainBirdIQ4ForbiddenError("/Satellite/GetSatellite")
+
         async def get_stations(self, _controller_id: int) -> list[Station]:
             return [Station(4, 3, "Front lawn", 1)]
+
+        async def get_station_detail_response_structure(self, _station_id: int) -> str:
+            return "object keys=[id, name]"
 
         async def get_programs(self, _controller_id: int) -> list[Program]:
             return [Program(5, "Morning", "A", 3, True, 100, "1111111", 0, 1)]
@@ -108,7 +117,7 @@ def test_diagnostic_prints_non_secret_cloud_data(monkeypatch, capsys) -> None:  
     monkeypatch.setattr("builtins.input", lambda _prompt: username)
     monkeypatch.setattr(diagnostic.getpass, "getpass", lambda _prompt: password)
 
-    diagnostic.main([])
+    diagnostic.main(["--live-state-debug"])
 
     output = capsys.readouterr().out
     assert "Authentication successful" in output
@@ -119,6 +128,10 @@ def test_diagnostic_prints_non_secret_cloud_data(monkeypatch, capsys) -> None:  
     assert "Morning" in output
     assert "06:30" in output
     assert "Connected: True" in output
+    assert (
+        "Controller detail response for 3: FORBIDDEN (HTTP 403; endpoint /Satellite/GetSatellite)"
+    ) in output
+    assert "Station detail response structure for 4" in output
     assert "Runtime-only program references:" in output
     assert "    C" in output
     assert "test-password" not in output
@@ -127,11 +140,13 @@ def test_diagnostic_prints_non_secret_cloud_data(monkeypatch, capsys) -> None:  
 
 def test_diagnostic_reports_authentication_error(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     """Authentication failures are concise and traceback-free."""
+
     async def fake_run(
         _username: str,
         _password: str,
         _controller_id: int | None = None,
         _debug_program_response: bool = False,
+        _debug_controller_detail: bool = False,
     ) -> None:
         raise RainBirdIQ4AuthenticationError("details are not displayed")
 
@@ -150,11 +165,13 @@ def test_diagnostic_reports_authentication_error(monkeypatch, capsys) -> None:  
 
 def test_diagnostic_redacts_sensitive_error_details(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     """Diagnostic error output redacts credential-like values."""
+
     async def fake_run(
         _username: str,
         _password: str,
         _controller_id: int | None = None,
         _debug_program_response: bool = False,
+        _debug_controller_detail: bool = False,
     ) -> None:
         raise RainBirdIQ4ConnectionError(
             "ClientConnectorError: https://example.test/#access_token=secret-token"
@@ -182,14 +199,75 @@ def test_diagnostic_accepts_controller_and_program_debug_options(monkeypatch) ->
         _password: str,
         controller_id: int | None = None,
         debug_program_response: bool = False,
+        debug_controller_detail: bool = False,
     ) -> None:
         received["controller_id"] = controller_id
         received["program_debug"] = debug_program_response
+        received["controller_detail_debug"] = debug_controller_detail
 
     monkeypatch.setattr(diagnostic, "_run_diagnostic", fake_run)
     monkeypatch.setattr("builtins.input", lambda _prompt: "test-user")
     monkeypatch.setattr(diagnostic.getpass, "getpass", lambda _prompt: "test-password")
 
-    diagnostic.main(["--controller", "200001", "--program-debug"])
+    diagnostic.main(["--controller", "200001", "--program-debug", "--live-state-debug"])
 
-    assert received == {"controller_id": 200001, "program_debug": True}
+    assert received == {
+        "controller_id": 200001,
+        "program_debug": True,
+        "controller_detail_debug": True,
+    }
+
+
+def test_diagnostic_accepts_station_list_debug_option(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The safe station-list option reaches the read-only runner."""
+    received: dict[str, object] = {}
+
+    async def fake_run(
+        _username: str,
+        _password: str,
+        _controller_id: int | None = None,
+        _debug_program_response: bool = False,
+        _debug_controller_detail: bool = False,
+        debug_station_list: bool = False,
+    ) -> None:
+        received["station_list_debug"] = debug_station_list
+
+    monkeypatch.setattr(diagnostic, "_run_diagnostic", fake_run)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "test-user")
+    monkeypatch.setattr(diagnostic.getpass, "getpass", lambda _prompt: "test-password")
+
+    diagnostic.main(["--controller", "200001", "--debug-station-list"])
+
+    assert received["station_list_debug"] is True
+
+
+def test_diagnostic_classifies_required_endpoint_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A required endpoint 403 is not reported as an authentication failure."""
+
+    async def fake_run(
+        _username: str,
+        _password: str,
+        _controller_id: int | None = None,
+        _debug_program_response: bool = False,
+        _debug_controller_detail: bool = False,
+    ) -> None:
+        raise RainBirdIQ4ForbiddenError(
+            "/Satellite/private?access_token=secret#authorization=Bearer-secret"
+        )
+
+    monkeypatch.setattr(diagnostic, "_run_diagnostic", fake_run)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "test-user")
+    monkeypatch.setattr(diagnostic.getpass, "getpass", lambda _prompt: "test-password")
+
+    diagnostic.main([])
+
+    output = capsys.readouterr().out
+    assert output == (
+        "Diagnostic error: IQ4 API endpoint forbidden: /Satellite/private (HTTP 403)\n"
+    )
+    assert "authentication failed" not in output
+    assert "secret" not in output
+    assert "test-password" not in output

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+from collections.abc import Awaitable, Callable
+from functools import partial
 
 from .cloud.auth import authenticate
 from .cloud.client import RainBirdIQ4CloudClient
@@ -19,9 +21,12 @@ from .cloud.models import (
     StationRuntime,
 )
 from .exceptions import (
+    RainBirdIQ4APIError,
     RainBirdIQ4AuthenticationError,
     RainBirdIQ4ConnectionError,
     RainBirdIQ4Error,
+    RainBirdIQ4ForbiddenError,
+    RainBirdIQ4UnsupportedEndpointError,
     safe_error_detail,
 )
 
@@ -118,11 +123,39 @@ def _print_controller(
             print(f"    {program_name}")
 
 
+async def _print_optional_response_structure(
+    label: str,
+    identifier: int,
+    request: Callable[[], Awaitable[str]],
+) -> None:
+    """Print one optional read-only response without aborting the diagnostic."""
+    try:
+        structure = await request()
+    except RainBirdIQ4ForbiddenError as err:
+        print(
+            f"{label} response for {identifier}: FORBIDDEN "
+            f"(HTTP {err.status}; endpoint {err.endpoint})"
+        )
+    except RainBirdIQ4UnsupportedEndpointError as err:
+        print(
+            f"{label} response for {identifier}: UNSUPPORTED "
+            f"(HTTP {err.status}; endpoint {err.endpoint})"
+        )
+    except RainBirdIQ4APIError as err:
+        print(
+            f"{label} response for {identifier}: ERROR (HTTP {err.status}; endpoint {err.endpoint})"
+        )
+    else:
+        print(f"{label} response structure for {identifier}: {structure}")
+
+
 async def _run_diagnostic(
     username: str,
     password: str,
     controller_id: int | None = None,
     debug_program_response: bool = False,
+    debug_controller_detail: bool = False,
+    debug_station_list: bool = False,
 ) -> None:
     """Authenticate and print read-only IQ4 account information."""
     token = await authenticate(username, password)
@@ -138,9 +171,7 @@ async def _run_diagnostic(
     connection_statuses = await client.get_connection_statuses(
         [controller.id for controller in controllers]
     )
-    status_by_controller = {
-        status.controller_id: status for status in connection_statuses
-    }
+    status_by_controller = {status.controller_id: status for status in connection_statuses}
 
     if controller_id is not None:
         selected = [controller for controller in controllers if controller.id == controller_id]
@@ -152,10 +183,16 @@ async def _run_diagnostic(
         _print_site(site)
 
     for controller in controllers:
-        connected = status_by_controller.get(controller.id, ConnectionStatus(
-            controller.id, False, ""
-        )).is_connected
+        connected = status_by_controller.get(
+            controller.id, ConnectionStatus(controller.id, False, "")
+        ).is_connected
         effective_programs = await client.get_effective_programs(controller.id)
+        if debug_controller_detail:
+            await _print_optional_response_structure(
+                "Controller detail",
+                controller.id,
+                partial(client.get_controller_detail_response_structure, controller.id),
+            )
         if debug_program_response:
             structure = await client.get_program_response_structure(controller.id)
             print(f"Program response structure for {controller.id}: {structure}")
@@ -175,6 +212,16 @@ async def _run_diagnostic(
                 f"{scheduled_structure}"
             )
         stations = await client.get_stations(controller.id)
+        if debug_station_list:
+            for line in await client.get_station_list_debug(controller.id):
+                print(line)
+        if debug_controller_detail and stations:
+            station_id = stations[0].id
+            await _print_optional_response_structure(
+                "Station detail",
+                station_id,
+                partial(client.get_station_detail_response_structure, station_id),
+            )
         start_times = (
             await client.get_start_times(controller.id)
             if not effective_programs or effective_programs[0].source == "direct"
@@ -211,6 +258,18 @@ def main(argv: list[str] | None = None) -> None:
         dest="debug_program_response",
         help="Print the value-free GetProgramList response structure",
     )
+    parser.add_argument(
+        "--debug-station-list",
+        action="store_true",
+        help="Print station-list keys and allowlisted configuration fields",
+    )
+    parser.add_argument(
+        "--debug-controller-detail",
+        "--live-state-debug",
+        action="store_true",
+        dest="debug_controller_detail",
+        help="Print value-free controller and station detail structures",
+    )
     args = parser.parse_args(argv)
     username = input("IQ4 username: ")
     password = getpass.getpass("IQ4 password: ")
@@ -222,13 +281,18 @@ def main(argv: list[str] | None = None) -> None:
                 password,
                 args.controller_id,
                 args.debug_program_response,
+                args.debug_controller_detail,
+                **({"debug_station_list": True} if args.debug_station_list else {}),
             )
         )
     except RainBirdIQ4AuthenticationError as exc:
-        print(
-            "Diagnostic error: IQ4 authentication failed: "
-            f"{safe_error_detail(exc)}"
-        )
+        print(f"Diagnostic error: IQ4 authentication failed: {safe_error_detail(exc)}")
+    except RainBirdIQ4ForbiddenError as exc:
+        print(f"Diagnostic error: IQ4 API endpoint forbidden: {exc.endpoint} (HTTP {exc.status})")
+    except RainBirdIQ4UnsupportedEndpointError as exc:
+        print(f"Diagnostic error: IQ4 API endpoint unsupported: {exc.endpoint} (HTTP {exc.status})")
+    except RainBirdIQ4APIError as exc:
+        print(f"Diagnostic error: IQ4 API endpoint failed: {exc.endpoint} (HTTP {exc.status})")
     except RainBirdIQ4ConnectionError as exc:
         print(f"Diagnostic error: {safe_error_detail(exc)}")
     except RainBirdIQ4Error as exc:

@@ -11,6 +11,8 @@ import aiohttp
 from ..exceptions import (
     RainBirdIQ4AuthenticationError,
     RainBirdIQ4ConnectionError,
+    RainBirdIQ4CredentialsError,
+    RainBirdIQ4WAFChallengeError,
     safe_error_detail,
 )
 
@@ -100,10 +102,7 @@ async def authenticate(
 
     return_url = _build_return_url(state, nonce)
 
-    login_url = (
-        f"{AUTH_BASE}/Account/Login?"
-        f"ReturnUrl={quote(return_url, safe='')}"
-    )
+    login_url = f"{AUTH_BASE}/Account/Login?ReturnUrl={quote(return_url, safe='')}"
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -118,14 +117,13 @@ async def authenticate(
         ) as session:
             async with session.get(login_url) as response:
                 if response.status == 202:
-                    raise RainBirdIQ4AuthenticationError(
+                    raise RainBirdIQ4WAFChallengeError(
                         "IQ4 login was blocked by an AWS WAF challenge"
                     )
 
                 if response.status >= 400:
                     raise RainBirdIQ4AuthenticationError(
-                        "IQ4 login returned an unexpected HTTP response "
-                        f"(HTTP {response.status})"
+                        f"IQ4 login returned an unexpected HTTP response (HTTP {response.status})"
                     )
 
                 login_html = await response.text()
@@ -133,9 +131,7 @@ async def authenticate(
             antiforgery = _extract_antiforgery_token(login_html)
 
             if antiforgery is None:
-                raise RainBirdIQ4AuthenticationError(
-                    "Unable to find IQ4 login antiforgery token"
-                )
+                raise RainBirdIQ4AuthenticationError("Unable to find IQ4 login antiforgery token")
 
             form = {
                 "Username": username,
@@ -150,14 +146,13 @@ async def authenticate(
                 allow_redirects=False,
             ) as response:
                 if response.status == 202:
-                    raise RainBirdIQ4AuthenticationError(
+                    raise RainBirdIQ4WAFChallengeError(
                         "IQ4 login was blocked by an AWS WAF challenge"
                     )
 
                 if response.status >= 400 and response.status not in (401, 403):
                     raise RainBirdIQ4AuthenticationError(
-                        "IQ4 login returned an unexpected HTTP response "
-                        f"(HTTP {response.status})"
+                        f"IQ4 login returned an unexpected HTTP response (HTTP {response.status})"
                     )
 
                 location = response.headers.get("Location", "")
@@ -175,9 +170,7 @@ async def authenticate(
                 return token
 
             if status in (401, 403):
-                raise RainBirdIQ4AuthenticationError(
-                    "IQ4 username or password was rejected"
-                )
+                raise RainBirdIQ4CredentialsError("IQ4 username or password was rejected")
 
             raise RainBirdIQ4AuthenticationError(
                 "IQ4 authentication returned an unexpected HTTP response "
@@ -188,6 +181,5 @@ async def authenticate(
         raise
     except (aiohttp.ClientError, TimeoutError, OSError) as exc:
         raise RainBirdIQ4ConnectionError(
-            "IQ4 connection failed: "
-            f"{type(exc).__name__}: {safe_error_detail(exc)}"
+            f"IQ4 connection failed: {type(exc).__name__}: {safe_error_detail(exc)}"
         ) from exc

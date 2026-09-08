@@ -9,9 +9,12 @@ from typing import Any
 import aiohttp
 
 from ..exceptions import (
+    RainBirdIQ4APIError,
     RainBirdIQ4AuthenticationError,
     RainBirdIQ4ConnectionError,
     RainBirdIQ4Error,
+    RainBirdIQ4ForbiddenError,
+    RainBirdIQ4UnsupportedEndpointError,
     safe_error_detail,
 )
 from .models import (
@@ -66,6 +69,29 @@ def _response_structure(data: Any) -> str:
     return type(data).__name__
 
 
+_STATION_DEBUG_FIELDS = (
+    "id",
+    "terminal",
+    "suspended",
+    "isLocked",
+    "discoveryState",
+    "status",
+)
+
+
+def _safe_station_debug_value(value: object) -> str:
+    """Render only simple non-secret station configuration values."""
+    if value is None or isinstance(value, (bool, int)):
+        return repr(value)
+    if (
+        isinstance(value, str)
+        and len(value) <= 32
+        and all(character.isalnum() or character in " _-" for character in value)
+    ):
+        return repr(value)
+    return f"<{type(value).__name__}>"
+
+
 class RainBirdIQ4CloudClient:
     """Client for the Rain Bird IQ4 cloud API."""
 
@@ -102,15 +128,19 @@ class RainBirdIQ4CloudClient:
 
         try:
             async with session.get(url, headers=headers, params=params) as response:
-                if response.status in (401, 403):
+                if response.status == 401:
                     raise RainBirdIQ4AuthenticationError(
-                        f"IQ4 authentication failed with HTTP {response.status}"
+                        f"IQ4 access token was rejected by endpoint {path}"
                     )
 
+                if response.status == 403:
+                    raise RainBirdIQ4ForbiddenError(path)
+
+                if response.status in (404, 405):
+                    raise RainBirdIQ4UnsupportedEndpointError(path, response.status)
+
                 if response.status >= 400:
-                    raise RainBirdIQ4Error(
-                        f"IQ4 API returned HTTP {response.status}"
-                    )
+                    raise RainBirdIQ4APIError(path, response.status)
 
                 content_type = _safe_content_type(response.headers.get("Content-Type"))
                 body = await response.text()
@@ -130,8 +160,7 @@ class RainBirdIQ4CloudClient:
             raise
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
             raise RainBirdIQ4ConnectionError(
-                "IQ4 connection failed: "
-                f"{type(exc).__name__}: {safe_error_detail(exc)}"
+                f"IQ4 connection failed: {type(exc).__name__}: {safe_error_detail(exc)}"
             ) from exc
         finally:
             if own_session:
@@ -158,9 +187,8 @@ class RainBirdIQ4CloudClient:
                 body = await response.text()
                 summary: dict[str, Any] = {
                     "status": response.status,
-                    "content_type": _safe_content_type(
-                        response.headers.get("Content-Type")
-                    ) or None,
+                    "content_type": _safe_content_type(response.headers.get("Content-Type"))
+                    or None,
                     "content_length": len(body),
                     "empty": not body.strip(),
                     "json_structure": None,
@@ -173,8 +201,7 @@ class RainBirdIQ4CloudClient:
                 return summary
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
             raise RainBirdIQ4ConnectionError(
-                "IQ4 connection failed: "
-                f"{type(exc).__name__}: {safe_error_detail(exc)}"
+                f"IQ4 connection failed: {type(exc).__name__}: {safe_error_detail(exc)}"
             ) from exc
         finally:
             if own_session:
@@ -190,6 +217,13 @@ class RainBirdIQ4CloudClient:
         data = await self._get("/Satellite/GetSatelliteList")
         return [Controller.from_dict(item) for item in data]
 
+    async def get_controller_detail_response_structure(self, controller_id: int) -> str:
+        """Return a value-free description of detailed controller data."""
+        data = await self._get(
+            "/Satellite/GetSatellite", params={"satelliteId": str(controller_id)}
+        )
+        return _response_structure(data)
+
     async def get_stations(self, controller_id: int) -> list[Station]:
         """Return stations for a controller."""
         data = await self._get(
@@ -197,6 +231,27 @@ class RainBirdIQ4CloudClient:
             params={"satelliteId": str(controller_id)},
         )
         return [Station.from_dict(item, controller_id) for item in data]
+
+    async def get_station_list_debug(self, controller_id: int) -> list[str]:
+        """Return only selected, non-secret station configuration fields."""
+        data = await self._get(
+            "/Station/GetStationListForSatellite",
+            params={"satelliteId": str(controller_id)},
+        )
+        records = _record_list(data, ("stations", "stationList", "data"))
+        lines = []
+        for index, record in enumerate(records, start=1):
+            fields = " ".join(
+                f"{key}={_safe_station_debug_value(record.get(key))}"
+                for key in _STATION_DEBUG_FIELDS
+            )
+            lines.append(f"Station list item {index}: {fields}")
+        return lines
+
+    async def get_station_detail_response_structure(self, station_id: int) -> str:
+        """Return a value-free description of detailed station data."""
+        data = await self._get("/Station/GetStation", params={"stationId": str(station_id)})
+        return _response_structure(data)
 
     async def get_programs(self, controller_id: int) -> list[Program]:
         """Return programs for a controller."""
@@ -240,11 +295,7 @@ class RainBirdIQ4CloudClient:
             data,
             ("scheduledPrograms", "programs", "data", "items", "results"),
         )
-        return [
-            ScheduledProgram.from_dict(item)
-            for item in records
-            if "programId" in item
-        ]
+        return [ScheduledProgram.from_dict(item) for item in records if "programId" in item]
 
     async def get_effective_programs(self, controller_id: int) -> list[EffectiveProgram]:
         """Return direct programs or schedule-derived MQTT programs."""
@@ -274,11 +325,7 @@ class RainBirdIQ4CloudClient:
                 "includeProgramGroup": "false",
             },
         )
-        return [
-            StartTime.from_dict(item)
-            for item in data
-            if item.get("programId") in program_ids
-        ]
+        return [StartTime.from_dict(item) for item in data if item.get("programId") in program_ids]
 
     async def get_station_runtimes(self, controller_id: int) -> list[StationRuntime]:
         """Return runtime assignments grouped by station."""
