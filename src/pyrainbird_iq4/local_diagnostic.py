@@ -1,4 +1,4 @@
-"""Safe read-only diagnostic for an IQ4 controller's local SIP protocol."""
+"""Safe IQ4 local diagnostic with explicitly confirmed write validation."""
 
 from __future__ import annotations
 
@@ -26,12 +26,20 @@ from pyrainbird.exceptions import (  # type: ignore[import-untyped]
     RainbirdDeviceNackError,
 )
 
-from .local import LocalQueueState, derive_run_state
+from .local import LocalQueueState, LocalRunState, RainBirdIQ4LocalClient, derive_run_state
 
 AUTH_METHOD = (
     "controller-local password/PIN; used as the AES key for encrypted "
     "JSON-RPC requests to the local /stick endpoint"
 )
+
+CONTROL_SUPPORT_COMMANDS = (
+    ("manual program start", 0x38),
+    ("manual station start", 0x39),
+    ("stop irrigation", 0x40),
+)
+
+WRITE_CONFIRMATION = "I_UNDERSTAND_THIS_WATERS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,8 +209,18 @@ def _queue_response(response: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-async def _run(host: str, password: str) -> int:
-    """Read local state one operation at a time without changing irrigation."""
+async def _run(
+    host: str,
+    password: str,
+    *,
+    check_control_support: bool = False,
+    write_test: str | None = None,
+    station_id: int | None = None,
+    terminal: int | None = None,
+    duration_minutes: int | None = None,
+    write_confirmation: str | None = None,
+) -> int:
+    """Read local state and optionally execute one explicitly confirmed write."""
     async with aiohttp.ClientSession() as session:
         try:
             controller, transport = await _connect(session, host, password)
@@ -257,11 +275,83 @@ async def _run(host: str, password: str) -> int:
         queue = LocalQueueState.from_responses(*queue_pages)
         active_terminals = tuple(sorted(values[1].active_set)) if values[1] is not None else ()
         print(f"Local high-level irrigation state: {derive_run_state(active_terminals, queue)}")
+
+        if check_control_support:
+            for name, command_id in CONTROL_SUPPORT_COMMANDS:
+                usable, _ = await _read(
+                    f"Local command support {name} (0x{command_id:02X})",
+                    partial(controller.test_command_support, command_id),
+                    lambda supported: "SUPPORTED" if supported else "NOT SUPPORTED",
+                )
+                if not usable:
+                    break
+        if write_test is not None:
+            if write_confirmation != WRITE_CONFIRMATION:
+                print(
+                    f"Local write validation: REFUSED (pass --confirm-write {WRITE_CONFIRMATION})"
+                )
+                return 2
+            current_state = derive_run_state(active_terminals, queue)
+            client = RainBirdIQ4LocalClient(controller)
+            if write_test == "start":
+                if station_id is None or terminal is None or duration_minutes is None:
+                    print(
+                        "Local write validation: REFUSED "
+                        "(--station-id, --terminal, and --duration-minutes are required)"
+                    )
+                    return 2
+                if current_state is not LocalRunState.IDLE:
+                    print("Local write validation: REFUSED (controller is not confirmed idle)")
+                    return 2
+                available = values[2]
+                if available is None or terminal not in available.active_set:
+                    print("Local write validation: REFUSED (terminal is not locally available)")
+                    return 2
+                try:
+                    await client.start_station(terminal, duration_minutes)
+                except BaseException as error:
+                    print(
+                        "Local write validation start: AMBIGUOUS "
+                        f"({_safe_failure(error)}; do not retry automatically)"
+                    )
+                    return 1
+                try:
+                    verified = await client.wait_for_station_active(terminal)
+                except BaseException as error:
+                    print(
+                        "Local write validation start: ACKNOWLEDGED "
+                        "verified=False "
+                        f"verification_error={_safe_failure(error)} "
+                        f"station_id={station_id} terminal={terminal}"
+                    )
+                    return 1
+                print(
+                    "Local write validation start: ACKNOWLEDGED "
+                    f"verified={verified} station_id={station_id} terminal={terminal}"
+                )
+            else:
+                if current_state is LocalRunState.IDLE:
+                    print("Local write validation stop: NOT SENT verified=True (already idle)")
+                    return 0
+                try:
+                    await client.stop_irrigation()
+                    observed = await client.get_realtime_state()
+                except BaseException as error:
+                    print(
+                        "Local write validation stop: AMBIGUOUS "
+                        f"({_safe_failure(error)}; do not retry automatically)"
+                    )
+                    return 1
+                print(
+                    "Local write validation stop: ACKNOWLEDGED "
+                    f"verified={observed.state is LocalRunState.IDLE}"
+                )
+
     return 0
 
 
 def main() -> None:
-    """Run the local read-only diagnostic."""
+    """Run the local diagnostic."""
     parser = argparse.ArgumentParser(
         description="Read IQ4 local live state without changing irrigation."
     )
@@ -271,11 +361,43 @@ def main() -> None:
         action="store_true",
         help="describe local authentication without displaying the credential",
     )
+    parser.add_argument(
+        "--check-control-support",
+        action="store_true",
+        help="read advertised support for start/stop commands without executing them",
+    )
+    parser.add_argument(
+        "--write-test",
+        choices=("start", "stop"),
+        help="execute exactly one explicitly confirmed control validation",
+    )
+    parser.add_argument("--station-id", type=int, help="stable cloud station ID for start")
+    parser.add_argument("--terminal", type=int, help="resolved physical terminal for start")
+    parser.add_argument(
+        "--duration-minutes", type=int, help="start duration from 1 through 30 minutes"
+    )
+    parser.add_argument(
+        "--confirm-write",
+        help="required literal confirmation for a write validation",
+    )
     args = parser.parse_args()
     if args.show_auth_method:
         print(f"Local authentication method: {AUTH_METHOD}")
     password = getpass.getpass("Local controller password: ")
-    raise SystemExit(asyncio.run(_run(args.host, password)))
+    raise SystemExit(
+        asyncio.run(
+            _run(
+                args.host,
+                password,
+                check_control_support=args.check_control_support,
+                write_test=args.write_test,
+                station_id=args.station_id,
+                terminal=args.terminal,
+                duration_minutes=args.duration_minutes,
+                write_confirmation=args.confirm_write,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

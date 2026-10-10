@@ -20,9 +20,16 @@ class _Mask:
 
 
 class _Controller:
-    def __init__(self, *, connection_failure: bool = False, queue_failure: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        connection_failure: bool = False,
+        queue_failure: bool = False,
+        command_support: dict[int, bool] | None = None,
+    ) -> None:
         self.connection_failure = connection_failure
         self.queue_failure = queue_failure
+        self.command_support = command_support or {}
         self.calls: list[str] = []
 
     async def get_current_irrigation(self) -> bool:
@@ -46,6 +53,10 @@ class _Controller:
     async def get_rain_delay(self) -> int:
         self.calls.append("rain_delay")
         return 0
+
+    async def test_command_support(self, command_id: int) -> bool:
+        self.calls.append(f"support_{command_id:02X}")
+        return self.command_support.get(command_id, False)
 
     async def _process_command(self, _render: Any, _command: str, page: int) -> dict[str, Any]:
         self.calls.append(f"queue_{page}")
@@ -108,6 +119,43 @@ async def test_optional_failure_continues_to_later_command(
     assert "Local current queue page 1: {'program': 1, 'seconds': 30, 'zone': 2}" in output
     assert controller.calls[-2:] == ["queue_0", "queue_1"]
     assert "do-not-print" not in output
+
+
+async def test_control_support_probe_is_opt_in_and_read_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only the explicit flag probes support and never invokes control commands."""
+    controller = _Controller(command_support={0x38: False, 0x39: True, 0x40: True})
+
+    async def connect(_session: Any, _host: str, _password: str) -> Any:
+        return controller, local_diagnostic.LocalTransport("https", 443)
+
+    monkeypatch.setattr(local_diagnostic, "_connect", connect)
+
+    assert await local_diagnostic._run("192.0.2.10", "secret", check_control_support=True) == 0
+    output = capsys.readouterr().out
+    assert "Local command support manual program start (0x38): NOT SUPPORTED" in output
+    assert "Local command support manual station start (0x39): SUPPORTED" in output
+    assert "Local command support stop irrigation (0x40): SUPPORTED" in output
+    assert controller.calls[-3:] == ["support_38", "support_39", "support_40"]
+    assert "secret" not in output
+
+
+async def test_control_support_probe_is_skipped_by_default(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Normal diagnostics do not issue even read-only capability probes."""
+    controller = _Controller(command_support={0x38: True, 0x39: True, 0x40: True})
+
+    async def connect(_session: Any, _host: str, _password: str) -> Any:
+        return controller, local_diagnostic.LocalTransport("https", 443)
+
+    monkeypatch.setattr(local_diagnostic, "_connect", connect)
+
+    assert await local_diagnostic._run("192.0.2.10", "secret") == 0
+    output = capsys.readouterr().out
+    assert "Local command support" not in output
+    assert not any(call.startswith("support_") for call in controller.calls)
 
 
 @pytest.mark.parametrize(

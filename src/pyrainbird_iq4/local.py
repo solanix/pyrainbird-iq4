@@ -18,7 +18,10 @@ from pyrainbird.async_client import (  # type: ignore[import-untyped]
 )
 from pyrainbird.exceptions import (  # type: ignore[import-untyped]
     RainbirdApiException,
+    RainbirdAuthException,
     RainbirdConnectionError,
+    RainbirdDeviceBusyException,
+    RainbirdDeviceNackError,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,6 +90,10 @@ class LocalController(Protocol):
 
     async def get_rain_delay(self) -> int: ...
 
+    async def irrigate_zone(self, zone: int, minutes: int) -> None: ...
+
+    async def stop_irrigation(self) -> None: ...
+
     async def _process_command(
         self,
         render: Any,
@@ -112,6 +119,26 @@ class LocalIrrigationState:
     def state(self) -> LocalRunState:
         """Derive a conservative run state from corroborating live fields."""
         return derive_run_state(self.active_terminals, self.queue)
+
+    @property
+    def confirms_idle(self) -> bool:
+        """Return whether both authoritative realtime reads prove the controller idle."""
+        return self.state is LocalRunState.IDLE and not self.failed_commands & {
+            "active_terminals",
+            "current_queue_page_0",
+        }
+
+    def confirms_active_terminal(self, terminal: int) -> bool:
+        """Return whether live mask or running queue confirms this terminal."""
+        if terminal in self.active_terminals:
+            return True
+        return bool(
+            self.queue is not None
+            and self.queue.current is not None
+            and (self.queue.current.running is True or self.queue.current.active is True)
+            and self.queue.zones is not None
+            and any(zone.terminal == terminal for zone in self.queue.zones)
+        )
 
     @property
     def remaining_runtime_seconds(self) -> int | None:
@@ -287,7 +314,7 @@ def _optional_bool(value: object) -> bool | None:
 
 
 class RainBirdIQ4LocalClient:
-    """Read-only facade over the established Rain Bird local SIP client."""
+    """Serialized read and explicitly invoked write access to local IQ4 SIP."""
 
     def __init__(self, controller: LocalController, controller_id: int | None = None) -> None:
         """Initialize the local live-state client."""
@@ -330,6 +357,121 @@ class RainBirdIQ4LocalClient:
             kind,
             self._snapshot_count,
         )
+
+    @staticmethod
+    def _control_outcome(error: Exception) -> str:
+        """Classify a write failure without rendering sensitive exception text."""
+        if isinstance(error, RainbirdAuthException):
+            return "authentication_failed"
+        if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+            return "timeout_outcome_unknown"
+        if isinstance(
+            error,
+            (
+                RainbirdConnectionError,
+                aiohttp.ClientConnectionError,
+                ConnectionError,
+            ),
+        ):
+            return "connection_outcome_unknown"
+        if isinstance(error, (RainbirdDeviceNackError, RainbirdDeviceBusyException)):
+            return "controller_rejected"
+        if isinstance(error, RainbirdApiException):
+            return "api_error"
+        return "unexpected_error"
+
+    async def start_station(self, terminal: int, duration_minutes: int) -> None:
+        """Start one terminal once; acknowledgement does not verify watering state."""
+        if not isinstance(terminal, int) or isinstance(terminal, bool) or terminal < 1:
+            raise ValueError("terminal must be a positive integer")
+        if (
+            not isinstance(duration_minutes, int)
+            or isinstance(duration_minutes, bool)
+            or not 1 <= duration_minutes <= 30
+        ):
+            raise ValueError("duration_minutes must be an integer from 1 through 30")
+        async with self._request_lock:
+            started = perf_counter()
+            try:
+                await self._controller.irrigate_zone(terminal, duration_minutes)
+            except Exception as err:
+                _LOGGER.warning(
+                    "IQ4 local control controller=%s operation=start_station terminal=%s "
+                    "duration_minutes=%s outcome=%s exception=%s elapsed_ms=%s",
+                    self._controller_id,
+                    terminal,
+                    duration_minutes,
+                    self._control_outcome(err),
+                    type(err).__name__,
+                    round((perf_counter() - started) * 1000),
+                )
+                raise
+            _LOGGER.info(
+                "IQ4 local control controller=%s operation=start_station terminal=%s "
+                "duration_minutes=%s outcome=acknowledged elapsed_ms=%s",
+                self._controller_id,
+                terminal,
+                duration_minutes,
+                round((perf_counter() - started) * 1000),
+            )
+
+    async def wait_for_station_active(
+        self,
+        terminal: int,
+        *,
+        attempts: int = 5,
+        delay_seconds: float = 1.0,
+    ) -> bool:
+        """Poll read-only state until the requested terminal is confirmed active."""
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
+        for attempt in range(attempts):
+            state = await self.get_realtime_state()
+            if state.confirms_active_terminal(terminal):
+                return True
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay_seconds)
+        return False
+
+    async def wait_for_idle(
+        self,
+        *,
+        attempts: int = 5,
+        delay_seconds: float = 1.0,
+    ) -> bool:
+        """Poll read-only state until complete realtime data confirms idle."""
+        if attempts < 1:
+            raise ValueError("attempts must be at least 1")
+        for attempt in range(attempts):
+            state = await self.get_realtime_state()
+            if state.confirms_idle:
+                return True
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay_seconds)
+        return False
+
+    async def stop_irrigation(self) -> None:
+        """Stop irrigation once; acknowledgement does not verify resulting state."""
+        async with self._request_lock:
+            started = perf_counter()
+            try:
+                await self._controller.stop_irrigation()
+            except Exception as err:
+                _LOGGER.warning(
+                    "IQ4 local control controller=%s operation=stop_irrigation "
+                    "outcome=%s exception=%s elapsed_ms=%s",
+                    self._controller_id,
+                    self._control_outcome(err),
+                    type(err).__name__,
+                    round((perf_counter() - started) * 1000),
+                )
+                raise
+            _LOGGER.info(
+                "IQ4 local control controller=%s operation=stop_irrigation "
+                "outcome=acknowledged elapsed_ms=%s",
+                self._controller_id,
+                round((perf_counter() - started) * 1000),
+            )
 
     async def get_realtime_state(self) -> LocalIrrigationState:
         """Fetch the minimal realtime snapshot, skipping queue page one while idle."""

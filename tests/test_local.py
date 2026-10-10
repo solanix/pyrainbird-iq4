@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pyrainbird.exceptions import RainbirdApiException  # type: ignore[import-untyped]
+from pyrainbird.exceptions import (  # type: ignore[import-untyped]
+    RainbirdApiException,
+    RainbirdAuthException,
+    RainbirdConnectionError,
+    RainbirdDeviceNackError,
+)
 
 from pyrainbird_iq4.local import (
     LocalIrrigationState,
@@ -65,6 +70,22 @@ class _Controller:
         if self.fail == "rain_delay":
             raise RainbirdApiException("password=local-secret")
         return 0
+
+    async def irrigate_zone(self, zone: int, minutes: int) -> None:
+        self.calls.append(f"start_{zone}_{minutes}")
+        failures = {
+            "start_timeout": TimeoutError("password=local-secret"),
+            "start_auth": RainbirdAuthException("password=local-secret"),
+            "start_connection": RainbirdConnectionError("password=local-secret"),
+            "start_rejected": RainbirdDeviceNackError("password=local-secret"),
+        }
+        if (error := failures.get(self.fail)) is not None:
+            raise error
+
+    async def stop_irrigation(self) -> None:
+        self.calls.append("stop_irrigation")
+        if self.fail == "stop_timeout":
+            raise TimeoutError("password=local-secret")
 
     async def _process_command(
         self, _render: object, _command: str, page: int
@@ -498,3 +519,271 @@ def test_observed_idle_manual_and_scheduled_samples(
     assert state.queue is not None
     assert state.queue.current is not None
     assert state.queue.current.zones_remaining == zones_remaining
+
+
+async def test_start_station_sends_upstream_command_and_returns_none() -> None:
+    """A valid station start issues exactly one upstream write."""
+    controller = _Controller(active=set())
+    client = RainBirdIQ4LocalClient(controller, 200001)
+
+    result = await client.start_station(2, 5)
+
+    assert result is None
+    assert controller.calls == ["start_2_5"]
+
+
+@pytest.mark.parametrize("duration", [1, 30])
+async def test_start_station_accepts_duration_boundaries(duration: int) -> None:
+    """Both documented duration boundaries reach the controller unchanged."""
+    controller = _Controller(active=set())
+
+    await RainBirdIQ4LocalClient(controller).start_station(7, duration)
+
+    assert controller.calls == [f"start_7_{duration}"]
+
+
+@pytest.mark.parametrize("duration", [0, 31, -1, 1.5, "5", True, False])
+async def test_start_station_rejects_invalid_duration(duration: object) -> None:
+    """Malformed and out-of-range durations never reach the controller."""
+    controller = _Controller(active=set())
+
+    with pytest.raises(ValueError, match="duration_minutes"):
+        await RainBirdIQ4LocalClient(controller).start_station(2, duration)  # type: ignore[arg-type]
+
+    assert controller.calls == []
+
+
+@pytest.mark.parametrize("terminal", [0, -1, 1.5, "2", True, False])
+async def test_start_station_rejects_invalid_terminal(terminal: object) -> None:
+    """Malformed terminals never reach the controller."""
+    controller = _Controller(active=set())
+
+    with pytest.raises(ValueError, match="terminal"):
+        await RainBirdIQ4LocalClient(controller).start_station(terminal, 1)  # type: ignore[arg-type]
+
+    assert controller.calls == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "exception_type", "outcome"),
+    [
+        pytest.param(
+            "start_auth",
+            RainbirdAuthException,
+            "authentication_failed",
+            id="authentication",
+        ),
+        pytest.param(
+            "start_connection",
+            RainbirdConnectionError,
+            "connection_outcome_unknown",
+            id="connection",
+        ),
+        pytest.param(
+            "start_timeout",
+            TimeoutError,
+            "timeout_outcome_unknown",
+            id="timeout",
+        ),
+        pytest.param(
+            "start_rejected",
+            RainbirdDeviceNackError,
+            "controller_rejected",
+            id="controller-rejection",
+        ),
+    ],
+)
+async def test_start_failure_is_classified_not_retried_and_redacted(
+    failure: str,
+    exception_type: type[Exception],
+    outcome: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Upstream failures retain their type after exactly one write attempt."""
+    controller = _Controller(active=set(), fail=failure)
+    client = RainBirdIQ4LocalClient(controller, 200001)
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(exception_type):
+        await client.start_station(2, 1)
+
+    assert controller.calls == ["start_2_1"]
+    assert f"outcome={outcome}" in caplog.text
+    assert f"exception={exception_type.__name__}" in caplog.text
+    assert "local-secret" not in caplog.text
+
+
+async def test_stop_irrigation_acknowledgement_returns_none() -> None:
+    """Stop issues exactly one command and needs no cloud context."""
+    controller = _Controller(running=True)
+
+    result = await RainBirdIQ4LocalClient(controller, 200001).stop_irrigation()
+
+    assert result is None
+    assert controller.calls == ["stop_irrigation"]
+
+
+async def test_stop_timeout_is_not_retried() -> None:
+    """An ambiguous stop timeout is propagated after one attempt."""
+    controller = _Controller(running=True, fail="stop_timeout")
+
+    with pytest.raises(TimeoutError):
+        await RainBirdIQ4LocalClient(controller).stop_irrigation()
+
+    assert controller.calls == ["stop_irrigation"]
+
+
+async def test_read_and_write_operations_are_serialized() -> None:
+    """A write waits until the in-progress realtime read releases the client lock."""
+
+    class BlockingController(_Controller):
+        def __init__(self) -> None:
+            super().__init__(active=set())
+            self.read_started = asyncio.Event()
+            self.release_read = asyncio.Event()
+
+        async def get_zone_states(self) -> _Mask:
+            self.calls.append("get_zone_states")
+            self.read_started.set()
+            await self.release_read.wait()
+            return _Mask(set())
+
+    controller = BlockingController()
+    client = RainBirdIQ4LocalClient(controller)
+    read_task = asyncio.create_task(client.get_realtime_state())
+    await controller.read_started.wait()
+    write_task = asyncio.create_task(client.start_station(2, 1))
+    await asyncio.sleep(0)
+
+    assert "start_2_1" not in controller.calls
+
+    controller.release_read.set()
+    await read_task
+    await write_task
+    assert controller.calls[-1] == "start_2_1"
+
+
+async def test_initialization_and_polling_never_issue_writes() -> None:
+    """Constructing and polling the client invokes only read operations."""
+    controller = _Controller(active=set())
+    client = RainBirdIQ4LocalClient(controller)
+
+    await client.get_realtime_state()
+    await client.get_slow_state()
+
+    assert not any(call.startswith("start_") for call in controller.calls)
+    assert "stop_irrigation" not in controller.calls
+
+
+def _verification_state(
+    *,
+    active: tuple[int, ...] = (),
+    running: bool = False,
+    queue_terminal: int | None = None,
+) -> LocalIrrigationState:
+    """Build a compact post-write verification snapshot."""
+    return LocalIrrigationState(
+        irrigation_enabled=True,
+        active_terminals=active,
+        available_terminals=(1, 2, 3),
+        rain_sensor_active=False,
+        rain_delay_days=0,
+        queue=LocalQueueState.from_responses(
+            {
+                "program": {
+                    "program": 4 if running else 0,
+                    "running": running,
+                    "zonesRemaining": 0,
+                }
+            },
+            {
+                "zones": (
+                    [{"program": 0, "zone": queue_terminal, "seconds": 55}]
+                    if queue_terminal is not None
+                    else []
+                )
+            },
+        ),
+    )
+
+
+async def test_start_verification_tolerates_delayed_state_transition() -> None:
+    """An acknowledged write is verified by later reads without repeating it."""
+    controller = _Controller(active=set())
+    client = RainBirdIQ4LocalClient(controller)
+    client.get_realtime_state = AsyncMock(
+        side_effect=[
+            _verification_state(),
+            _verification_state(),
+            _verification_state(active=(1,), running=True, queue_terminal=1),
+        ]
+    )
+
+    await client.start_station(1, 1)
+    verified = await client.wait_for_station_active(1, attempts=5, delay_seconds=0)
+
+    assert verified is True
+    assert client.get_realtime_state.await_count == 3
+    assert controller.calls == ["start_1_1"]
+
+
+async def test_start_verification_accepts_running_queue_zone() -> None:
+    """A running page-one zone confirms the terminal when the active mask lags."""
+    client = RainBirdIQ4LocalClient(_Controller(active=set()))
+    client.get_realtime_state = AsyncMock(
+        return_value=_verification_state(running=True, queue_terminal=1)
+    )
+
+    assert await client.wait_for_station_active(1, attempts=1) is True
+
+
+async def test_start_verification_rejects_wrong_terminal_after_bound() -> None:
+    """Unrelated active evidence remains unconfirmed after the bounded reads."""
+    client = RainBirdIQ4LocalClient(_Controller(active=set()))
+    client.get_realtime_state = AsyncMock(
+        return_value=_verification_state(active=(2,), running=True, queue_terminal=2)
+    )
+
+    assert await client.wait_for_station_active(1, attempts=3, delay_seconds=0) is False
+    assert client.get_realtime_state.await_count == 3
+
+
+async def test_stop_verification_polls_until_idle() -> None:
+    """Delayed idle evidence is accepted within the bounded read-only window."""
+    client = RainBirdIQ4LocalClient(_Controller(active=set()))
+    client.get_realtime_state = AsyncMock(
+        side_effect=[
+            _verification_state(active=(1,), running=True, queue_terminal=1),
+            _verification_state(),
+        ]
+    )
+
+    assert await client.wait_for_idle(attempts=5, delay_seconds=0) is True
+    assert client.get_realtime_state.await_count == 2
+
+
+async def test_stop_verification_rejects_incomplete_idle_after_bound() -> None:
+    """An idle-looking snapshot without the active mask never confirms a stop."""
+    incomplete = LocalIrrigationState(
+        irrigation_enabled=None,
+        active_terminals=(),
+        available_terminals=None,
+        rain_sensor_active=None,
+        rain_delay_days=None,
+        queue=_verification_state().queue,
+        failed_commands=frozenset({"active_terminals"}),
+    )
+    client = RainBirdIQ4LocalClient(_Controller(active=set()))
+    client.get_realtime_state = AsyncMock(return_value=incomplete)
+
+    assert incomplete.state is LocalRunState.IDLE
+    assert await client.wait_for_idle(attempts=3, delay_seconds=0) is False
+    assert client.get_realtime_state.await_count == 3
+
+
+async def test_verification_requires_at_least_one_attempt() -> None:
+    """A zero-attempt verification window is a caller error."""
+    client = RainBirdIQ4LocalClient(_Controller(active=set()))
+
+    with pytest.raises(ValueError):
+        await client.wait_for_idle(attempts=0)
