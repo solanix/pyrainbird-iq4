@@ -209,10 +209,10 @@ def test_diagnostic_accepts_controller_and_program_debug_options(monkeypatch) ->
     monkeypatch.setattr("builtins.input", lambda _prompt: "test-user")
     monkeypatch.setattr(diagnostic.getpass, "getpass", lambda _prompt: "test-password")
 
-    diagnostic.main(["--controller", "200001", "--program-debug", "--live-state-debug"])
+    diagnostic.main(["--controller", "1001", "--program-debug", "--live-state-debug"])
 
     assert received == {
-        "controller_id": 200001,
+        "controller_id": 1001,
         "program_debug": True,
         "controller_detail_debug": True,
     }
@@ -236,7 +236,7 @@ def test_diagnostic_accepts_station_list_debug_option(monkeypatch) -> None:  # t
     monkeypatch.setattr("builtins.input", lambda _prompt: "test-user")
     monkeypatch.setattr(diagnostic.getpass, "getpass", lambda _prompt: "test-password")
 
-    diagnostic.main(["--controller", "200001", "--debug-station-list"])
+    diagnostic.main(["--controller", "1001", "--debug-station-list"])
 
     assert received["station_list_debug"] is True
 

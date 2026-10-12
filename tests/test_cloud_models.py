@@ -65,16 +65,16 @@ def test_controller_from_dict() -> None:
 
 def test_station_preserves_cloud_name_and_immutable_identity() -> None:
     """Cloud names are presentation data independent of stable station identity."""
-    station = Station.from_dict({"id": 108, "name": "Front Lawn", "terminal": 8}, 200001)
+    station = Station.from_dict({"id": 108, "name": "Front Lawn", "terminal": 8}, 1001)
 
-    assert (station.id, station.controller_id, station.terminal) == (108, 200001, 8)
+    assert (station.id, station.controller_id, station.terminal) == (108, 1001, 8)
     assert station.name == "Front Lawn"
 
 
 def test_station_blank_name_uses_padded_terminal_fallback() -> None:
     """Null, blank, and whitespace-only API names use the deterministic fallback."""
     for name in (None, "", "   "):
-        station = Station.from_dict({"id": 108, "name": name, "terminal": 8}, 200001)
+        station = Station.from_dict({"id": 108, "name": name, "terminal": 8}, 1001)
         assert station.name == "Station 008"
 
 
@@ -88,7 +88,7 @@ def test_station_enabled_state_uses_verified_is_locked_semantics() -> None:
                 "terminal": terminal,
                 "isLocked": terminal <= 7,
             },
-            200001,
+            1001,
         )
         for terminal in range(1, 11)
     ]
@@ -99,7 +99,7 @@ def test_station_enabled_state_uses_verified_is_locked_semantics() -> None:
     assert stations[0].is_locked is True
     assert stations[7].is_locked is False
     assert stations[9].is_locked is False
-    unknown = Station.from_dict({"id": 11, "name": "Spare", "terminal": 11}, 200001)
+    unknown = Station.from_dict({"id": 11, "name": "Spare", "terminal": 11}, 1001)
     assert unknown.is_locked is None
     assert unknown.is_enabled is None
     assert unknown_state_stations([unknown]) == [unknown]

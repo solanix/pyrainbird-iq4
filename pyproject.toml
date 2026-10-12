@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,30 @@ version = "0.1.0"
 description = "Python library for communicating with Rain Bird IQ4 irrigation controllers"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kris Sanders" }]
+keywords = ["rain bird", "rainbird", "iq4", "irrigation", "home assistant", "asyncio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+    "Typing :: Typed",
+]
 
 dependencies = [
     "aiohttp>=3.10",
     "pyrainbird>=6.5.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/solanix/pyrainbird-iq4"
+Issues = "https://github.com/solanix/pyrainbird-iq4/issues"
 
 [project.scripts]
 rainbird-iq4-diagnostic = "pyrainbird_iq4.diagnostic:main"

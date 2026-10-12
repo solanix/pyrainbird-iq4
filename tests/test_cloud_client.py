@@ -179,7 +179,7 @@ async def test_empty_program_response_is_supported() -> None:
     """A successful null program response is treated as an empty result."""
     client = _FakeCloudClient({"/Program/GetProgramList": None})
 
-    assert await client.get_programs(200001) == []
+    assert await client.get_programs(1001) == []
 
 
 async def test_scheduled_programs_parse_multiple_times_and_optional_fields() -> None:
@@ -201,7 +201,7 @@ async def test_scheduled_programs_parse_multiple_times_and_optional_fields() -> 
         }
     )
 
-    programs = await client.get_scheduled_start_times(200001)
+    programs = await client.get_scheduled_start_times(1001)
 
     assert programs == [
         ScheduledProgram(
@@ -241,7 +241,7 @@ async def test_effective_programs_fall_back_to_scheduled_programs() -> None:
         }
     )
 
-    effective = await client.get_effective_programs(200001)
+    effective = await client.get_effective_programs(1001)
 
     assert len(effective) == 1
     assert effective[0].source == "scheduled"
@@ -328,8 +328,8 @@ async def test_controller_detail_structure_is_value_free() -> None:
     client = _FakeCloudClient(
         {
             "/Satellite/GetSatellite": {
-                "id": 200001,
-                "name": "Backyard",
+                "id": 1001,
+                "name": "Example Site",
                 "state": {"activeStationId": None, "remainingRuntime": 0},
             },
             "/Station/GetStation": {
@@ -340,7 +340,7 @@ async def test_controller_detail_structure_is_value_free() -> None:
         }
     )
 
-    structure = await client.get_controller_detail_response_structure(200001)
+    structure = await client.get_controller_detail_response_structure(1001)
     station_structure = await client.get_station_detail_response_structure(101)
 
     assert structure == (
@@ -348,11 +348,11 @@ async def test_controller_detail_structure_is_value_free() -> None:
         "keys=[activeStationId, remainingRuntime] "
         "children=[activeStationId=null]]"
     )
-    assert "Backyard" not in structure
+    assert "Example Site" not in structure
     assert station_structure == "object keys=[enabled, id, name]"
     assert "Station 001" not in station_structure
     assert client.calls == [
-        ("/Satellite/GetSatellite", {"satelliteId": "200001"}),
+        ("/Satellite/GetSatellite", {"satelliteId": "1001"}),
         ("/Station/GetStation", {"stationId": "101"}),
     ]
 
@@ -380,7 +380,7 @@ async def test_station_list_debug_allowlists_configuration_values() -> None:
         }
     )
 
-    lines = await client.get_station_list_debug(200001)
+    lines = await client.get_station_list_debug(1001)
 
     assert lines == [
         "Station list item 1: "
@@ -399,7 +399,7 @@ async def test_station_list_debug_allowlists_configuration_values() -> None:
         "do-not-print",
     ):
         assert sensitive_value not in output
-    assert client.calls == [("/Station/GetStationListForSatellite", {"satelliteId": "200001"})]
+    assert client.calls == [("/Station/GetStationListForSatellite", {"satelliteId": "1001"})]
 
 
 @pytest.mark.parametrize(

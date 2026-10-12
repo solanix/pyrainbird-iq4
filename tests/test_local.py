@@ -190,7 +190,7 @@ async def test_connection_close_avoids_stale_keepalive_reuse(
         await persistent_server.request("post", "https://controller/stick", headers={})
 
     force_close_server = _ClosedKeepAliveServer()
-    transport = _NoKeepAliveSession(force_close_server, 200001)  # type: ignore[arg-type]
+    transport = _NoKeepAliveSession(force_close_server, 1001)  # type: ignore[arg-type]
     await transport.request("post", "https://controller/stick", headers={})
     await transport.request("post", "https://controller/stick", headers={})
 
@@ -207,7 +207,7 @@ async def test_idle_realtime_snapshot_skips_queue_page_one() -> None:
     """Idle realtime polling uses only active terminals and queue page zero."""
     controller = _Controller(active=set(), running=False)
 
-    state = await RainBirdIQ4LocalClient(controller, 200001).get_realtime_state()
+    state = await RainBirdIQ4LocalClient(controller, 1001).get_realtime_state()
 
     assert state.state is LocalRunState.IDLE
     assert controller.calls == ["get_zone_states", "get_queue_0"]
@@ -217,7 +217,7 @@ async def test_running_realtime_snapshot_reads_queue_page_one() -> None:
     """Running realtime polling adds page one for zone, program, and runtime."""
     controller = _Controller(active={2}, running=True)
 
-    state = await RainBirdIQ4LocalClient(controller, 200001).get_realtime_state()
+    state = await RainBirdIQ4LocalClient(controller, 1001).get_realtime_state()
 
     assert state.state is LocalRunState.RUNNING
     assert state.active_terminal == 2
@@ -229,7 +229,7 @@ async def test_queue_page_zero_failure_returns_partial_snapshot() -> None:
     """A page-zero failure is retained as field-level uncertainty without retry."""
     controller = _Controller(active=set(), running=False, fail="current_queue_page_0")
 
-    state = await RainBirdIQ4LocalClient(controller, 200001).get_realtime_state()
+    state = await RainBirdIQ4LocalClient(controller, 1001).get_realtime_state()
 
     assert state.state is LocalRunState.UNKNOWN
     assert state.failed_commands == frozenset({"current_queue_page_0"})
@@ -243,7 +243,7 @@ async def test_slow_command_failure_is_partial_and_safely_logged(
     controller = _Controller(active=set(), fail="rain_delay")
     caplog.set_level(logging.DEBUG, logger="pyrainbird_iq4.local")
 
-    state = await RainBirdIQ4LocalClient(controller, 200001).get_slow_state()
+    state = await RainBirdIQ4LocalClient(controller, 1001).get_slow_state()
 
     assert state.irrigation_enabled is True
     assert state.available_terminals == (1, 2, 3)
@@ -256,7 +256,7 @@ async def test_slow_command_failure_is_partial_and_safely_logged(
         "get_rain_sensor_state",
         "get_rain_delay",
     ]
-    assert "controller=200001 command=rain_delay status=failed" in caplog.text
+    assert "controller=1001 command=rain_delay status=failed" in caplog.text
     assert "exception=RainbirdApiException" in caplog.text
     assert "elapsed_ms=" in caplog.text
     assert "local-secret" not in caplog.text
@@ -524,7 +524,7 @@ def test_observed_idle_manual_and_scheduled_samples(
 async def test_start_station_sends_upstream_command_and_returns_none() -> None:
     """A valid station start issues exactly one upstream write."""
     controller = _Controller(active=set())
-    client = RainBirdIQ4LocalClient(controller, 200001)
+    client = RainBirdIQ4LocalClient(controller, 1001)
 
     result = await client.start_station(2, 5)
 
@@ -601,7 +601,7 @@ async def test_start_failure_is_classified_not_retried_and_redacted(
 ) -> None:
     """Upstream failures retain their type after exactly one write attempt."""
     controller = _Controller(active=set(), fail=failure)
-    client = RainBirdIQ4LocalClient(controller, 200001)
+    client = RainBirdIQ4LocalClient(controller, 1001)
     caplog.set_level(logging.DEBUG)
 
     with pytest.raises(exception_type):
@@ -617,7 +617,7 @@ async def test_stop_irrigation_acknowledgement_returns_none() -> None:
     """Stop issues exactly one command and needs no cloud context."""
     controller = _Controller(running=True)
 
-    result = await RainBirdIQ4LocalClient(controller, 200001).stop_irrigation()
+    result = await RainBirdIQ4LocalClient(controller, 1001).stop_irrigation()
 
     assert result is None
     assert controller.calls == ["stop_irrigation"]
