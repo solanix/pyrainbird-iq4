@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from pyrainbird.exceptions import (  # type: ignore[import-untyped]
     RainbirdApiException,
@@ -14,6 +15,7 @@ from pyrainbird.exceptions import (  # type: ignore[import-untyped]
 )
 
 from pyrainbird_iq4.local import (
+    LOCAL_CONNECT_TIMEOUT,
     LocalIrrigationState,
     LocalQueueState,
     LocalRunState,
@@ -201,6 +203,67 @@ async def test_connection_close_avoids_stale_keepalive_reuse(
     ]
     assert "status=new_connection_requested keepalive=false" in caplog.text
     assert "status=response connection_header=close keepalive=false" in caplog.text
+
+
+class _RecordingSession:
+    """Record the timeout each local request is made with."""
+
+    def __init__(self, timeout: object = None) -> None:
+        if timeout is not None:
+            self.timeout = timeout
+        self.timeouts: list[aiohttp.ClientTimeout] = []
+
+    async def request(self, _method: str, _url: str, **kwargs: object) -> object:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, aiohttp.ClientTimeout)
+        self.timeouts.append(timeout)
+        return type("Response", (), {"headers": {}})()
+
+
+async def test_connect_timeout_bounds_session_default() -> None:
+    """A hung connect fails after LOCAL_CONNECT_TIMEOUT, not aiohttp's 30 s."""
+    session = _RecordingSession(aiohttp.ClientTimeout(total=300, sock_connect=30))
+    transport = _NoKeepAliveSession(session, 1001)  # type: ignore[arg-type]
+
+    await transport.request("post", "https://controller/stick", headers={})
+
+    assert session.timeouts == [
+        aiohttp.ClientTimeout(total=300, sock_connect=LOCAL_CONNECT_TIMEOUT)
+    ]
+
+
+async def test_connect_timeout_keeps_caller_limits() -> None:
+    """A per-request timeout keeps its own limits; only the connect is bounded."""
+    session = _RecordingSession(aiohttp.ClientTimeout(total=300, sock_connect=30))
+    transport = _NoKeepAliveSession(session, 1001)  # type: ignore[arg-type]
+
+    await transport.request(
+        "post",
+        "https://controller/stick",
+        headers={},
+        timeout=aiohttp.ClientTimeout(total=10.0),
+    )
+    await transport.request(
+        "post",
+        "https://controller/stick",
+        headers={},
+        timeout=aiohttp.ClientTimeout(total=10.0, sock_connect=1.0),
+    )
+
+    assert session.timeouts == [
+        aiohttp.ClientTimeout(total=10.0, sock_connect=LOCAL_CONNECT_TIMEOUT),
+        aiohttp.ClientTimeout(total=10.0, sock_connect=1.0),
+    ]
+
+
+async def test_connect_timeout_without_session_timeout() -> None:
+    """A session-like object without a timeout still gets a bounded connect."""
+    session = _RecordingSession()
+    transport = _NoKeepAliveSession(session, 1001)  # type: ignore[arg-type]
+
+    await transport.request("post", "https://controller/stick", headers={})
+
+    assert session.timeouts == [aiohttp.ClientTimeout(sock_connect=LOCAL_CONNECT_TIMEOUT)]
 
 
 async def test_idle_realtime_snapshot_skips_queue_page_one() -> None:

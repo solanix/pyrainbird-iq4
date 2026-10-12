@@ -27,6 +27,28 @@ from pyrainbird.exceptions import (  # type: ignore[import-untyped]
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
+# aiohttp waits 30 s for a TCP connect by default. The controller's port is sometimes
+# held by another IQ4 client, and a connect that hangs that long stalls every queued
+# local operation. A LAN connect completes in milliseconds, and a request that never
+# connected sent nothing, so failing it early is safe for writes too.
+LOCAL_CONNECT_TIMEOUT = 5.0
+
+
+def _with_connect_timeout(timeout: object) -> aiohttp.ClientTimeout:
+    """Bound the TCP connect, keeping every other limit of ``timeout``."""
+    if not isinstance(timeout, aiohttp.ClientTimeout):
+        return aiohttp.ClientTimeout(sock_connect=LOCAL_CONNECT_TIMEOUT)
+    sock_connect = timeout.sock_connect
+    if sock_connect is None or sock_connect > LOCAL_CONNECT_TIMEOUT:
+        sock_connect = LOCAL_CONNECT_TIMEOUT
+    return aiohttp.ClientTimeout(
+        total=timeout.total,
+        connect=timeout.connect,
+        sock_read=timeout.sock_read,
+        sock_connect=sock_connect,
+        ceil_threshold=timeout.ceil_threshold,
+    )
+
 
 class _NoKeepAliveSession:
     """Apply connection-close semantics only to local controller requests."""
@@ -39,6 +61,9 @@ class _NoKeepAliveSession:
         """Request a fresh connection and safely report response lifecycle data."""
         headers = dict(kwargs.pop("headers", {}))
         headers["Connection"] = "close"
+        kwargs["timeout"] = _with_connect_timeout(
+            kwargs.get("timeout", getattr(self._session, "timeout", None))
+        )
         _LOGGER.debug(
             "IQ4 local transport controller=%s status=new_connection_requested keepalive=false",
             self._controller_id,
