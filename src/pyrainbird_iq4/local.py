@@ -33,19 +33,31 @@ _T = TypeVar("_T")
 # connected sent nothing, so failing it early is safe for writes too.
 LOCAL_CONNECT_TIMEOUT = 5.0
 
+# Once connected, the controller answers within a few seconds, yet a live soak saw it
+# accept a request and then send nothing until aiohttp's 300 s total limit. A write cut
+# off here is still reported as an unknown outcome and never retried.
+LOCAL_READ_TIMEOUT = 15.0
+LOCAL_TOTAL_TIMEOUT = 30.0
+
+
+def _cap(value: float | None, limit: float) -> float:
+    """Return ``value`` unless it is unset or above ``limit``."""
+    return limit if value is None or value > limit else value
+
 
 def _with_connect_timeout(timeout: object) -> aiohttp.ClientTimeout:
-    """Bound the TCP connect, keeping every other limit of ``timeout``."""
+    """Bound the TCP connect, the read and the whole request, keeping tighter limits."""
     if not isinstance(timeout, aiohttp.ClientTimeout):
-        return aiohttp.ClientTimeout(sock_connect=LOCAL_CONNECT_TIMEOUT)
-    sock_connect = timeout.sock_connect
-    if sock_connect is None or sock_connect > LOCAL_CONNECT_TIMEOUT:
-        sock_connect = LOCAL_CONNECT_TIMEOUT
+        return aiohttp.ClientTimeout(
+            total=LOCAL_TOTAL_TIMEOUT,
+            sock_connect=LOCAL_CONNECT_TIMEOUT,
+            sock_read=LOCAL_READ_TIMEOUT,
+        )
     return aiohttp.ClientTimeout(
-        total=timeout.total,
+        total=_cap(timeout.total, LOCAL_TOTAL_TIMEOUT),
         connect=timeout.connect,
-        sock_read=timeout.sock_read,
-        sock_connect=sock_connect,
+        sock_read=_cap(timeout.sock_read, LOCAL_READ_TIMEOUT),
+        sock_connect=_cap(timeout.sock_connect, LOCAL_CONNECT_TIMEOUT),
         ceil_threshold=timeout.ceil_threshold,
     )
 

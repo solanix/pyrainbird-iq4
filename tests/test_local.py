@@ -16,6 +16,8 @@ from pyrainbird.exceptions import (  # type: ignore[import-untyped]
 
 from pyrainbird_iq4.local import (
     LOCAL_CONNECT_TIMEOUT,
+    LOCAL_READ_TIMEOUT,
+    LOCAL_TOTAL_TIMEOUT,
     LocalIrrigationState,
     LocalQueueState,
     LocalRunState,
@@ -221,19 +223,23 @@ class _RecordingSession:
 
 
 async def test_connect_timeout_bounds_session_default() -> None:
-    """A hung connect fails after LOCAL_CONNECT_TIMEOUT, not aiohttp's 30 s."""
+    """A hung connect or response fails within seconds, not aiohttp's 30 s or 300 s."""
     session = _RecordingSession(aiohttp.ClientTimeout(total=300, sock_connect=30))
     transport = _NoKeepAliveSession(session, 1001)  # type: ignore[arg-type]
 
     await transport.request("post", "https://controller/stick", headers={})
 
     assert session.timeouts == [
-        aiohttp.ClientTimeout(total=300, sock_connect=LOCAL_CONNECT_TIMEOUT)
+        aiohttp.ClientTimeout(
+            total=LOCAL_TOTAL_TIMEOUT,
+            sock_connect=LOCAL_CONNECT_TIMEOUT,
+            sock_read=LOCAL_READ_TIMEOUT,
+        )
     ]
 
 
 async def test_connect_timeout_keeps_caller_limits() -> None:
-    """A per-request timeout keeps its own limits; only the connect is bounded."""
+    """A per-request timeout keeps limits tighter than the local caps."""
     session = _RecordingSession(aiohttp.ClientTimeout(total=300, sock_connect=30))
     transport = _NoKeepAliveSession(session, 1001)  # type: ignore[arg-type]
 
@@ -251,8 +257,10 @@ async def test_connect_timeout_keeps_caller_limits() -> None:
     )
 
     assert session.timeouts == [
-        aiohttp.ClientTimeout(total=10.0, sock_connect=LOCAL_CONNECT_TIMEOUT),
-        aiohttp.ClientTimeout(total=10.0, sock_connect=1.0),
+        aiohttp.ClientTimeout(
+            total=10.0, sock_connect=LOCAL_CONNECT_TIMEOUT, sock_read=LOCAL_READ_TIMEOUT
+        ),
+        aiohttp.ClientTimeout(total=10.0, sock_connect=1.0, sock_read=LOCAL_READ_TIMEOUT),
     ]
 
 
@@ -263,7 +271,40 @@ async def test_connect_timeout_without_session_timeout() -> None:
 
     await transport.request("post", "https://controller/stick", headers={})
 
-    assert session.timeouts == [aiohttp.ClientTimeout(sock_connect=LOCAL_CONNECT_TIMEOUT)]
+    assert session.timeouts == [
+        aiohttp.ClientTimeout(
+            total=LOCAL_TOTAL_TIMEOUT,
+            sock_connect=LOCAL_CONNECT_TIMEOUT,
+            sock_read=LOCAL_READ_TIMEOUT,
+        )
+    ]
+
+
+async def test_silent_controller_fails_after_read_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A controller that accepts the request but never answers fails within the cap."""
+    monkeypatch.setattr("pyrainbird_iq4.local.LOCAL_READ_TIMEOUT", 0.2)
+
+    async def _accept_and_stay_silent(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.read(1024)
+        await asyncio.sleep(5)
+        writer.close()
+
+    server = await asyncio.start_server(_accept_and_stay_silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with aiohttp.ClientSession() as session:
+            transport = _NoKeepAliveSession(session, 1001)
+            started = asyncio.get_running_loop().time()
+            with pytest.raises(asyncio.TimeoutError):
+                await transport.request("post", f"http://127.0.0.1:{port}/stick", data=b"x")
+            assert asyncio.get_running_loop().time() - started < 2
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 async def test_idle_realtime_snapshot_skips_queue_page_one() -> None:
